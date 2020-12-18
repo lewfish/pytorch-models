@@ -4,6 +4,7 @@
 from IPython import get_ipython
 
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from torch.distributions import MultivariateNormal
 import torch.nn as nn
@@ -28,8 +29,35 @@ def sample_gmm(pis, mvns, N):
 
     return torch.cat(all_samples), torch.cat(all_sample_inds)
 
-def plot_gmm(sample_inds, samples):
+from matplotlib.patches import Ellipse
+
+# From https://jakevdp.github.io/PythonDataScienceHandbook/05.12-gaussian-mixtures.html
+def draw_ellipse(position, covariance, ax=None, **kwargs):
+    """Draw an ellipse with a given position and covariance"""
+    ax = ax or plt.gca()
+
+    # Convert covariance to principal axes
+    if covariance.shape == (2, 2):
+        U, s, Vt = np.linalg.svd(covariance)
+        angle = np.degrees(np.arctan2(U[1, 0], U[0, 0]))
+        width, height = 2 * np.sqrt(s)
+    else:
+        angle = 0
+        width, height = 2 * np.sqrt(covariance)
+
+    # Draw the Ellipse
+    for nsig in range(1, 4):
+        ax.add_patch(Ellipse(position, nsig * width, nsig * height,
+                             angle, **kwargs))
+
+def plot_gmm(sample_inds, samples, mvns=None):
     plt.scatter(samples[:, 0], samples[:, 1], c=sample_inds)
+    if mvns is not None:
+        for mvn in mvns:
+            draw_ellipse(
+                mvn.mean.detach().numpy(),
+                mvn.covariance_matrix.detach().numpy(),
+                alpha=0.2)
     plt.legend()
     plt.show()
 
@@ -109,7 +137,7 @@ class GmmSgd(nn.Module):
         print(str(self))
         pis, mvns = self.get_dists()
         samples, sample_inds = sample_gmm(pis, mvns, N)
-        plot_gmm(sample_inds, samples)
+        plot_gmm(sample_inds, samples, mvns)
 
 # %%
 d = 2
@@ -195,7 +223,7 @@ class GmmEm():
         print(str(self))
         mvns = self.get_mvns()
         samples, sample_inds = sample_gmm(self.pis, mvns, N)
-        plot_gmm(sample_inds, samples)
+        plot_gmm(sample_inds, samples, mvns)
 
 # %%
 d = 2
@@ -203,8 +231,6 @@ k = 10
 model = GmmEm(k, d)
 
 num_iters = 10
-log_interval = 50
-
 train_ds = TensorDataset(samples)
 train_dl = DataLoader(train_ds, batch_size=len(train_ds), shuffle=False)
 
