@@ -2,7 +2,7 @@
 
 set -e
 
-if [[ -n "$GMM_DEBUG" ]]; then
+if [[ -n "$PTM_DEBUG" ]]; then
     set -x
 fi
 
@@ -18,7 +18,7 @@ function usage() {
 Run a console in a Docker image locally.
 
 Environment variables:
-GMM_DATA_DIR (directory for storing data; mounted to /opt/data)
+PTM_DATA_DIR (directory for storing data; mounted to /opt/data)
 AWS_PROFILE (optional AWS profile)
 
 Options:
@@ -33,9 +33,9 @@ All arguments after above options are passed to 'docker run'.
 "
 }
 
-IMAGE="gmm"
-GMM_DATA_DIR="$GMM_DATA_DIR:-${REPO_ROOT}/data"
-GMM_NOTEBOOK_DIR="$GMM_NOTEBOOK_DIR:-${REPO_ROOT}/notebooks"
+IMAGE="pytorch_models"
+PTM_DATA_DIR="${PTM_DATA_DIR:-${REPO_ROOT}/data}"
+PTM_NOTEBOOK_DIR="$PTM_NOTEBOOK_DIR:-${REPO_ROOT}/notebooks"
 
 # Parse options using scheme in
 # https://stackoverflow.com/questions/192249/how-do-i-parse-command-line-arguments-in-bash
@@ -92,7 +92,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]
 then
     docker run ${RUNTIME} ${NAME} --rm -it \
         -v ${REPO_ROOT}/:/opt/src/ \
-        -v $GMM_DATA_DIR:/opt/data \
+        -v $PTM_DATA_DIR:/opt/data \
         ${TENSORBOARD} ${AWS} ${JUPYTER} ${DEBUG} \
         ${IMAGE} "${CMD[@]}"
 fi
