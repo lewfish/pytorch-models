@@ -28,8 +28,9 @@ get_ipython().run_line_magic('matplotlib', 'inline')
 
 # %%
 all_letters = string.ascii_letters + " .,;'-"
-EOS = len(all_letters)
-n_letters = len(all_letters) + 1 # Plus EOS marker
+START = len(all_letters)
+END = len(all_letters) + 1
+n_letters = len(all_letters) + 2
 
 def findFiles(path): return glob.glob(path)
 
@@ -79,62 +80,74 @@ def randomTrainingPair():
 def categoryTensor(category):
     return torch.tensor(all_categories.index(category))
 
-def inputTensor(line):
-    return torch.tensor([all_letters.find(letter) for letter in line])
-
-def targetTensor(line):
-    # second letter to EOS
-    return torch.cat([inputTensor(line[1:]), torch.tensor([EOS])])
+def line2tensor(line):
+    return torch.tensor([START] + [all_letters.find(letter) for letter in line] + [END])
 
 def randomTrainingExample():
     category, line = randomTrainingPair()
     category_tensor = categoryTensor(category)
-    input_line_tensor = inputTensor(line)
-    target_line_tensor = targetTensor(line)
+    line_tensor = line2tensor(line)
+    input_line_tensor = line_tensor[0:-1]
+    target_line_tensor = line_tensor[1:]
     return category_tensor, input_line_tensor, target_line_tensor
+
+def make_batch(batch_sz):
+    samples = []
+    for i in range(batch_sz):
+        samples.append(randomTrainingExample())
+    max_len = torch.tensor([len(s[1]) for s in samples]).max()
+
+    batch_cat = torch.cat([s[0].unsqueeze(0) for s in samples])
+    batch_input = torch.full((max_len, batch_sz), END, dtype=torch.long)
+    batch_target = torch.full((max_len, batch_sz), END, dtype=torch.long)
+    for i, s in enumerate(samples):
+        batch_input[0:len(s[1]), i] = s[1]
+        batch_target[0:len(s[2]), i] = s[2]
+    return batch_cat, batch_input, batch_target
 
 # %%
 class MyRNN(nn.Module):
-    def __init__(self, ncats, ninput, nhidden, nembed, nout):
+    def __init__(self, ncats, ntokens, nhidden, nembed, nout):
         super(MyRNN, self).__init__()
         self.cat_embed = nn.Embedding(ncats, nembed)
-        self.input_embed = nn.Embedding(ninput, nembed)
+        self.input_embed = nn.Embedding(ntokens, nembed)
         self.hidden = nn.Linear(nembed + nembed + nhidden, nhidden)
         self.output = nn.Linear(nembed + nhidden, nout)
 
     def forward(self, cat, input, hidden):
         cat = self.cat_embed(cat)
         input = self.input_embed(input)
-        hidden = nn.functional.tanh(self.hidden(torch.cat([cat, input, hidden])))
-        output = self.output(torch.cat([hidden, input]))
+        hidden = nn.functional.tanh(self.hidden(torch.cat([cat, input, hidden], dim=1)))
+        output = self.output(torch.cat([hidden, input], dim=1))
         return hidden, output
 
-    def get_init_hidden(self):
-        return torch.zeros(nhidden)
+    def get_init_hidden(self, batch_sz):
+        return torch.zeros(batch_sz, nhidden)
 
 # %%
 ncats = n_categories
-ninput = n_letters
+ntokens = n_letters
 nhidden = 128
 nembed = 5
 nout = n_letters
-model = MyRNN(ncats, ninput, nhidden, nembed, nout)
+model = MyRNN(ncats, ntokens, nhidden, nembed, nout)
 model.train()
 
-nsteps = 50000
-log_every = 1000
+nsteps = 10000
+log_every = 500
+batch_sz = 4
 lr = 1e-3
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
 sum_loss = 0.0
 for step in range(nsteps):
     model.zero_grad()
-    cat, input, target = randomTrainingExample()
-    hidden = model.get_init_hidden()
+    cat, input, target = make_batch(batch_sz)
+    hidden = model.get_init_hidden(batch_sz)
     loss = torch.tensor(0.0)
     for i in range(len(input)):
         hidden, output = model(cat, input[i], hidden)
-        loss += nn.functional.cross_entropy(output.unsqueeze(0), target[i].unsqueeze(0))
+        loss += nn.functional.cross_entropy(output, target[i])
     loss.backward()
     optimizer.step()
 
@@ -146,18 +159,18 @@ for step in range(nsteps):
 model.eval()
 
 # %%
-def get_sample(model, cat, start_char):
-    hidden = model.get_init_hidden()
+def get_sample(model, cat):
+    hidden = model.get_init_hidden(1)
     cat = categoryTensor(cat)
-    input = inputTensor(start_char)[0]
-    sample = [input]
+    input = torch.tensor(START)
+    sample = []
 
     with torch.no_grad():
         while True:
-            hidden, output = model(cat, input, hidden)
-            output_dist = nn.functional.softmax(output)
+            hidden, output = model(cat.unsqueeze(0), input.unsqueeze(0), hidden)
+            output_dist = nn.functional.softmax(output)[0]
             output = Categorical(output_dist).sample()
-            if output == EOS:
+            if output == END:
                 break
 
             input = output
@@ -166,9 +179,7 @@ def get_sample(model, cat, start_char):
     return ''.join([all_letters[s.item()] for s in sample])
 
 def get_samples(model, cat, nsamples):
-    return [
-        get_sample(model, cat, random.choice(string.ascii_uppercase))
-        for i in range(nsamples)]
+    return [get_sample(model, cat) for i in range(nsamples)]
 
 def print_samples():
     for cat in all_categories:
@@ -178,3 +189,5 @@ def print_samples():
         print()
 
 print_samples()
+
+# %%
