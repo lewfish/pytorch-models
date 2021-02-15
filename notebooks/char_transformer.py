@@ -1,11 +1,10 @@
-# Generates names from different languages using an RNN.
-
-# Reading material:
-# https://karpathy.github.io/2015/05/21/rnn-effectiveness/
-# https://pytorch.org/tutorials/intermediate/char_rnn_generation_tutorial.html
+# Generates names from different languages using a transformer.
 
 # The data loading part of this code was copied and adapted from
 # https://pytorch.org/tutorials/intermediate/char_rnn_generation_tutorial.html
+
+# The transformer code was based on:
+# http://peterbloem.nl/blog/transformers
 
 # %%
 from __future__ import unicode_literals, print_function, division
@@ -106,35 +105,110 @@ def make_batch(batch_sz):
     return batch_cat, batch_input, batch_target
 
 # %%
-class MyRNN(nn.Module):
-    def __init__(self, ncats, ntokens, nhidden, nembed, nout):
-        super(MyRNN, self).__init__()
-        self.cat_embed = nn.Embedding(ncats, nembed)
-        self.input_embed = nn.Embedding(ntokens, nembed)
-        self.hidden = nn.Linear(nembed + nembed + nhidden, nhidden)
-        self.output = nn.Linear(nembed + nhidden, nout)
+class SelfAttention(nn.Module):
+    def __init__(self, k, nheads=1, causal_mask=False):
+        super().__init__()
 
-    def forward(self, cat, input, hidden):
-        cat = self.cat_embed(cat)
-        input = self.input_embed(input)
-        hidden = nn.functional.tanh(self.hidden(torch.cat([cat, input, hidden], dim=1)))
-        output = self.output(torch.cat([hidden, input], dim=1))
-        return hidden, output
+        self.k = k
+        self.nheads = nheads
+        self.causal_mask = causal_mask
 
-    def get_init_hidden(self, batch_sz):
-        return torch.zeros(batch_sz, nhidden)
+        self.key = nn.Linear(k, k * nheads)
+        self.query = nn.Linear(k, k * nheads)
+        self.values = nn.Linear(k, k * nheads)
+        self.out = nn.Linear(k * nheads, k)
+
+    def forward(self, x):
+        # x is [t, b, k]
+        t, b = x.shape[0:2]
+        h = self.nheads
+        # x is [b, t, k]
+        x = x.transpose(0, 1).contiguous()
+
+        # [b, t, h * k] -> [b * h, t, k]
+        key = self.key(x).view(b, t, h, k).transpose(1, 2).contiguous().view(-1, t, k)
+        query = self.query(x).view(b, t, h, k).transpose(1, 2).contiguous().view(-1, t, k)
+        values = self.values(x).view(b, t, h, k).transpose(1, 2).contiguous().view(-1, t, k)
+
+        raw_att = torch.bmm(key, query.transpose(1, 2)) / (self.k ** 0.5)
+        if self.causal_mask:
+            mask_inds = torch.triu_indices(t, t, offset=1)
+            raw_att[:, mask_inds[0, :], mask_inds[1, :]] = float('-inf')
+        att = nn.functional.softmax(raw_att, dim=2)
+        out = torch.bmm(att, values)
+        # [b * h, t, k] -> [b, h, t, k] -> [b, t, h, k]
+        out = out.view(b, h, t, k).transpose(1, 2)
+        # [b, t, h, k] -> [t, b, h, k] -> [t, b, h * k]
+        out = out.transpose(0, 1).contiguous().view(t, b, -1)
+        out = self.out(out)
+        return out
+
+class TransformerBlock(nn.Module):
+    def __init__(self, k, nheads=1, hidden_factor=4, causal_mask=False):
+        super().__init__()
+
+        self.sa = SelfAttention(k, nheads=nheads, causal_mask=causal_mask)
+        self.ln1 = nn.LayerNorm(k)
+        self.mlp = nn.Sequential(
+            nn.Linear(k, k * hidden_factor),
+            nn.ReLU(),
+            nn.Linear(k * hidden_factor, k),
+        )
+        self.ln2 = nn.LayerNorm(k)
+
+    def forward(self, x):
+        # x is [t, b, k]
+        sa = self.sa(x)
+        x = x + sa
+        x = self.ln1(x)
+        mlp = self.mlp(x)
+        x = x + mlp
+        x = self.ln2(x)
+        return x
+
+class Transformer(nn.Module):
+    def __init__(self, ncats, ntokens, nblocks=2, nheads=1, max_len=20, k=32,
+                 hidden_factor=4, causal_mask=False):
+        super().__init__()
+
+        self.max_len = max_len
+        self.pos_embed = nn.Embedding(max_len, k)
+        self.cat_embed = nn.Embedding(ncats, k)
+        self.token_embed = nn.Embedding(ntokens, k)
+        self.transformer_blocks = nn.Sequential(*[
+            TransformerBlock(k, nheads, hidden_factor, causal_mask=causal_mask)
+            for i in range(nblocks)])
+        self.classifier = nn.Linear(k, ntokens)
+
+    def forward(self, cat, input):
+        # cat is [b]
+        # input is [t, b]
+        seq_len = input.shape[0]
+        if seq_len > self.max_len:
+            raise Exception('Input is longer than max_len')
+        batch_sz = input.shape[1]
+        pos = torch.arange(0, seq_len).unsqueeze(1).repeat(1, batch_sz) # [t, b]
+        cat = cat.unsqueeze(0).repeat(seq_len, 1) # [t, b]
+        x = self.pos_embed(pos) + self.cat_embed(cat) + self.token_embed(input)
+        x = self.transformer_blocks(x)
+        logits = self.classifier(x)
+        return logits
 
 # %%
 ncats = n_categories
 ntokens = n_letters
-nhidden = 128
-nembed = 5
-nout = n_letters
-model = MyRNN(ncats, ntokens, nhidden, nembed, nout)
+nblocks = 8
+nheads = 8
+max_len = 30
+k = 128
+
+model = Transformer(
+    ncats, ntokens, nblocks=nblocks, nheads=nheads, max_len=max_len, k=k,
+    causal_mask=True)
 model.train()
 
 nsteps = 10000
-log_every = 500
+log_every = 100
 batch_sz = 4
 lr = 1e-3
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -143,11 +217,8 @@ sum_loss = 0.0
 for step in range(nsteps):
     model.zero_grad()
     cat, input, target = make_batch(batch_sz)
-    hidden = model.get_init_hidden(batch_sz)
-    loss = torch.tensor(0.0)
-    for i in range(len(input)):
-        hidden, output = model(cat, input[i], hidden)
-        loss += nn.functional.cross_entropy(output, target[i])
+    output = model(cat, input)
+    loss = nn.functional.cross_entropy(output.view(-1, ntokens), target.view(-1))
     loss.backward()
     optimizer.step()
 
@@ -156,26 +227,26 @@ for step in range(nsteps):
         print(f'step: {step} / loss: {sum_loss / log_every}')
         sum_loss = 0.0
 
-model.eval()
+model = model.eval()
 
 # %%
 def get_sample(model, cat):
-    hidden = model.get_init_hidden(1)
     cat = categoryTensor(cat)
-    input = torch.tensor(START)
-    sample = []
+    input = [START]
 
     with torch.no_grad():
         while True:
-            hidden, output = model(cat.unsqueeze(0), input.unsqueeze(0), hidden)
-            output_dist = nn.functional.softmax(output)[0]
+            output = model(cat.unsqueeze(0), torch.tensor(input).unsqueeze(1))
+            output_dist = nn.functional.softmax(output[-1, 0, :])
+            sample = input[1:]
+
             output = Categorical(output_dist).sample()
             if output == END:
                 break
 
-            input = output
-            sample.append(output)
+            input.append(output)
 
+    sample = input[1:]
     return ''.join([all_letters[s.item()] for s in sample])
 
 def get_samples(model, cat, nsamples):
