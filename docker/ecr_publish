@@ -2,14 +2,14 @@
 
 set -e
 
-if [[ -n "$GMM_DEBUG" ]]; then
+if [[ -n "PTM_DEBUG" ]]; then
     set -x
 fi
 
 function usage() {
     echo -n \
          "Usage: $(basename "$0")
-Publishes gmm image to ECR. Expects GMM_ECR_IMAGE env var to be set to <ecr_repo_name>:<tag_name>
+Publishes pytorch_models:latest image to ECR. Expects PTM_ECR_IMAGE env var to be set to <ecr_repo_name>:<tag_name>
 "
 }
 
@@ -21,13 +21,13 @@ then
         exit
     fi
 
-    IMAGE_NAME="gmm:latest"
+    IMAGE_NAME="pytorch_models:latest"
     ACCOUNT_ID=$(aws sts get-caller-identity --output text --query 'Account')
     AWS_REGION="us-east-1"
 
     aws ecr get-login --no-include-email --region ${AWS_REGION} | bash;
     docker tag ${IMAGE_NAME} \
-        ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$GMM_ECR_IMAGE
+        ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$PTM_ECR_IMAGE
     docker push \
-        ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$GMM_ECR_IMAGE
+        ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/$PTM_ECR_IMAGE
 fi
