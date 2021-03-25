@@ -11,8 +11,13 @@ RUN pip install --no-index torch-cluster -f https://pytorch-geometric.com/whl/to
 RUN pip install --no-index torch-spline-conv -f https://pytorch-geometric.com/whl/torch-1.7.0+cu110.html
 RUN pip install torch-geometric
 
+RUN pip install ipywidgets==7.6.3
+RUN pip install pytorch-lightning==1.2.4
+RUN pip install awscli==1.19.35 boto3==1.17.35
+
 ENV PYTHONPATH=/opt/src/:$PYTHONPATH
 COPY notebooks /opt/src/notebooks/
+COPY pytorch_models /opt/src/pytorch_models/
 WORKDIR /opt/src
 
 CMD ["bash"]
