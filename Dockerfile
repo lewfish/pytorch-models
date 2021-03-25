@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:1.7.1-cuda11.0-cudnn8-runtime
+FROM pytorch/pytorch:1.6.0-cuda10.1-cudnn7-runtime
 
 RUN conda install -y notebook=6.1.* matplotlib=3.3.* scikit-learn=0.23.*
 RUN apt-get update && apt-get install -y python-opengl && apt-get clean
