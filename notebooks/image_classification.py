@@ -19,7 +19,6 @@ args.max_steps = 10
 args.limit_val_batches = 10
 args.limit_test_batches = 10
 args.fast_dev_run = False
-args.progress_bar_refresh_rate = 20
 args.max_epochs = 1
 
 # args.predict_only = True
@@ -27,5 +26,3 @@ args.max_epochs = 1
 
 # %%
 main(args)
-
-# %%

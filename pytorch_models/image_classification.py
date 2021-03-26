@@ -9,7 +9,7 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Subset
 import torch.nn as nn
-from torch.optim.lr_scheduler import CyclicLR
+from torch.optim.lr_scheduler import OneCycleLR
 import torchvision
 from torchvision.datasets import CIFAR10
 from torchvision import transforms as T
@@ -26,9 +26,13 @@ class ImageClassification(LightningModule):
         self.hparams = hparams
 
         model_cls = getattr(torchvision.models, self.hparams.backbone)
-        model = model_cls(pretrained=self.hparams.pretrained)
-        in_features = model.fc.in_features
-        model.fc = nn.Linear(in_features, self.hparams.num_classes)
+        model = model_cls(pretrained=self.hparams.pretrained, num_classes=10)
+        # This model modification is needed for 32x32 images. It makes
+        # accuracy go from about 85% to 93%. This should not be used if working with
+        # large images!
+        # Taken from https://github.com/PyTorchLightning/pytorch-lightning/blob/master/notebooks/07-cifar10-baseline.ipynb
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+        model.maxpool = nn.Identity()
         self.model = model
 
         self.prepared_data = False
@@ -43,21 +47,19 @@ class ImageClassification(LightningModule):
         self.log('train_loss', loss)
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    def eval_step(self, batch, batch_idx, split):
         x, y = batch
         y_hat = self(x)
         loss = F.cross_entropy(y_hat, y)
         acc = (y_hat.argmax(dim=1) == y).float().mean()
-        self.log('val_loss', loss)
-        self.log('val_acc', acc)
+        self.log(f'{split}_loss', loss)
+        self.log(f'{split}_acc', acc)
+
+    def validation_step(self, batch, batch_idx):
+        self.eval_step(batch, batch_idx, 'val')
 
     def test_step(self, batch, batch_idx):
-        x, y = batch
-        y_hat = self(x)
-        acc = (y_hat.argmax(dim=1) == y).float().mean()
-        loss = F.cross_entropy(y_hat, y)
-        self.log('test_loss', loss)
-        self.log('test_acc', acc)
+        self.eval_step(batch, batch_idx, 'test')
 
     def setup(self, stage):
         if stage == 'fit':
@@ -66,31 +68,28 @@ class ImageClassification(LightningModule):
             self.train_steps = (self.hparams.max_epochs * train_batches) // self.hparams.accumulate_grad_batches
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
-
-        step_size_up = self.train_steps // 2
-        step_size_down = self.train_steps - step_size_up
-        one_cycle_scheduler = CyclicLR(
-            optimizer,
-            base_lr=self.hparams.learning_rate / 10,
-            max_lr=self.hparams.learning_rate,
-            step_size_up=step_size_up,
-            step_size_down=step_size_down,
-            cycle_momentum=False)
-        scheduler = {
-            'scheduler': one_cycle_scheduler,
+        optimizer = torch.optim.SGD(
+            self.parameters(), lr=self.hparams.learning_rate,
+            momentum=self.hparams.momentum,
+            weight_decay=self.hparams.weight_decay)
+        scheduler_dict = {
+            'scheduler': OneCycleLR(
+                optimizer, self.hparams.learning_rate, total_steps=self.train_steps),
             'interval': 'step',
-            'frequency': 1,
         }
-
-        return [optimizer], [scheduler]
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler_dict}
 
     def prepare_data(self):
         if not self.prepared_data:
             train_transform = T.Compose(
                 [
-                    T.RandomCrop(32, padding=4, padding_mode='reflect'),
+                    T.RandomCrop(32, padding=4),
                     T.RandomHorizontalFlip(),
+                    T.ToTensor(),
+                ]
+            )
+            test_transform = T.Compose(
+                [
                     T.ToTensor(),
                 ]
             )
@@ -105,11 +104,11 @@ class ImageClassification(LightningModule):
                 self.hparams.data_dir, train=True, download=True, transform=train_transform),
                 train_inds)
             self.val_ds = Subset(CIFAR10(
-                self.hparams.data_dir, train=True, download=True, transform=train_transform),
+                self.hparams.data_dir, train=True, download=True, transform=test_transform),
                 val_inds)
             self.test_ds = CIFAR10(
                 self.hparams.data_dir, train=False, download=True,
-                transform=T.ToTensor())
+                transform=test_transform)
 
             self.prepared_data = True
 
@@ -193,13 +192,20 @@ class ImageClassification(LightningModule):
         parser.add_argument('--backbone', type=str, default='resnet18')
         parser.add_argument('--train_ratio', type=float, default=0.8)
         parser.add_argument('--seed', type=int, default=42)
-        parser.add_argument('--num_classes', type=int, default=10)
         parser.add_argument('--pretrained', type=bool, default=False)
-        parser.add_argument('--batch_size', type=int, default=32)
+        parser.add_argument('--batch_size', type=int, default=128)
         parser.add_argument('--num_workers', type=int, default=4)
         parser.add_argument('--hidden_dim', type=int, default=128)
         parser.add_argument('--data_dir', type=str, default='/opt/data/torch-cache/')
-        parser.add_argument('--learning_rate', type=float, default=0.0001)
+        parser.add_argument('--learning_rate', type=float, default=0.1)
+        parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
+                            help='momentum')
+        parser.add_argument('--weight_decay', '--wd', default=5e-4, type=float,
+                            metavar='W', help='weight decay')
+        parser.add_argument('--predict_only', action='store_true', dest='predict_only')
+        parser.set_defaults(predict_only=False)
+        parser.add_argument('--sync_min_interval', type=int, default=180)
+
         return parser
 
 def main(args):
@@ -232,7 +238,8 @@ def main(args):
         lr_monitor_callback = LearningRateMonitor()
         callbacks = [checkpoint_callback, lr_monitor_callback]
         if orig_root_dir.startswith('s3://'):
-            callbacks.append(S3SyncCallback(root_dir, orig_root_dir))
+            callbacks.append(
+                S3SyncCallback(root_dir, orig_root_dir, args.sync_min_interval))
 
         trainer = Trainer.from_argparse_args(
             args, logger=[csv_logger, tb_logger],
@@ -243,8 +250,8 @@ def main(args):
             model.plot_dataloaders(out_dir)
             trainer.fit(model)
 
-        test_metrics = trainer.test(model, test_dataloaders=model.val_dataloader())
-        out_path = join(root_dir, 'val-metrics.json')
+        test_metrics = trainer.test(model, test_dataloaders=model.test_dataloader())
+        out_path = join(root_dir, 'test-metrics.json')
         save_json(test_metrics, out_path)
 
         out_path = join(root_dir, 'predictions.png')
@@ -255,7 +262,6 @@ def main(args):
 
 def get_arg_parser():
     parser = ArgumentParser()
-    parser.add_argument('--predict_only', type=bool, default=False)
     parser = Trainer.add_argparse_args(parser)
     parser = ImageClassification.add_model_specific_args(parser)
 
