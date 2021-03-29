@@ -14,6 +14,7 @@ RUN pip install torch-geometric
 RUN pip install ipywidgets==7.6.3
 RUN pip install pytorch-lightning==1.2.4
 RUN pip install awscli==1.19.35 boto3==1.17.35
+RUN pip install lightning-bolts==0.3.2
 
 ENV PYTHONPATH=/opt/src/:$PYTHONPATH
 COPY notebooks /opt/src/notebooks/

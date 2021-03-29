@@ -11,12 +11,12 @@ from torch.utils.data import DataLoader, Subset
 import torch.nn as nn
 from torch.optim.lr_scheduler import OneCycleLR
 import torchvision
-from torchvision.datasets import CIFAR10
 from torchvision import transforms as T
 import matplotlib.pyplot as plt
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import pytorch_lightning as pl
+from pl_bolts.datamodules import CIFAR10DataModule
 
 from pytorch_models.utils import save_json, s3_sync, batch_submit, S3SyncCallback
 
@@ -26,7 +26,8 @@ class ImageClassification(LightningModule):
         self.hparams = hparams
 
         model_cls = getattr(torchvision.models, self.hparams.backbone)
-        model = model_cls(pretrained=self.hparams.pretrained, num_classes=10)
+        model = model_cls(
+            pretrained=self.hparams.pretrained, num_classes=self.hparams.num_classes)
         # This model modification is needed for 32x32 images. It makes
         # accuracy go from about 85% to 93%. This should not be used if working with
         # large images!
@@ -34,8 +35,6 @@ class ImageClassification(LightningModule):
         model.conv1 = nn.Conv2d(3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
         model.maxpool = nn.Identity()
         self.model = model
-
-        self.prepared_data = False
 
     def forward(self, x):
         return self.model(x)
@@ -61,71 +60,50 @@ class ImageClassification(LightningModule):
     def test_step(self, batch, batch_idx):
         self.eval_step(batch, batch_idx, 'test')
 
-    def setup(self, stage):
-        if stage == 'fit':
-            total_devices = max(1, self.hparams.gpus * self.hparams.num_nodes)
-            train_batches = len(self.train_dataloader()) // total_devices
-            self.train_steps = (self.hparams.max_epochs * train_batches) // self.hparams.accumulate_grad_batches
-
     def configure_optimizers(self):
+        total_devices = max(1, self.hparams.gpus * self.hparams.num_nodes)
+        train_batches = self.hparams.num_samples // total_devices
+        train_steps = (self.hparams.max_epochs * train_batches) // self.hparams.accumulate_grad_batches
+
         optimizer = torch.optim.SGD(
             self.parameters(), lr=self.hparams.learning_rate,
             momentum=self.hparams.momentum,
             weight_decay=self.hparams.weight_decay)
         scheduler_dict = {
             'scheduler': OneCycleLR(
-                optimizer, self.hparams.learning_rate, total_steps=self.train_steps),
+                optimizer, self.hparams.learning_rate, total_steps=train_steps),
             'interval': 'step',
         }
         return {'optimizer': optimizer, 'lr_scheduler': scheduler_dict}
 
-    def prepare_data(self):
-        if not self.prepared_data:
-            train_transform = T.Compose(
-                [
-                    T.RandomCrop(32, padding=4),
-                    T.RandomHorizontalFlip(),
-                    T.ToTensor(),
-                ]
-            )
-            test_transform = T.Compose(
-                [
-                    T.ToTensor(),
-                ]
-            )
-            self.full_dataset = CIFAR10(
-                self.hparams.data_dir, train=True, download=True)
-            self.classes = self.full_dataset.classes
-            train_len = int(round(len(self.full_dataset) * self.hparams.train_ratio))
-            inds = torch.randperm(len(self.full_dataset))
-            train_inds = inds[0:train_len]
-            val_inds = inds[train_len:]
-            self.train_ds = Subset(CIFAR10(
-                self.hparams.data_dir, train=True, download=True, transform=train_transform),
-                train_inds)
-            self.val_ds = Subset(CIFAR10(
-                self.hparams.data_dir, train=True, download=True, transform=test_transform),
-                val_inds)
-            self.test_ds = CIFAR10(
-                self.hparams.data_dir, train=False, download=True,
-                transform=test_transform)
+    @staticmethod
+    def add_model_specific_args(parent_parser):
+        parser = ArgumentParser(parents=[parent_parser], add_help=False)
+        parser.add_argument('--backbone', type=str, default='resnet18')
+        parser.add_argument('--val_split', type=float, default=0.2)
+        parser.add_argument('--seed', type=int, default=42)
+        parser.add_argument('--pretrained', type=bool, default=False)
+        parser.add_argument('--batch_size', type=int, default=128)
+        parser.add_argument('--num_workers', type=int, default=4)
+        parser.add_argument('--hidden_dim', type=int, default=128)
+        parser.add_argument('--data_dir', type=str, default='/opt/data/torch-cache/')
+        parser.add_argument('--learning_rate', type=float, default=0.1)
+        parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
+                            help='momentum')
+        parser.add_argument('--weight_decay', '--wd', default=5e-4, type=float,
+                            metavar='W', help='weight decay')
+        parser.add_argument('--predict_only', action='store_true', dest='predict_only')
+        parser.set_defaults(predict_only=False)
+        parser.add_argument('--sync_min_interval', type=int, default=180)
 
-            self.prepared_data = True
+        return parser
 
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_ds, shuffle=True, batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers)
 
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_ds, batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers)
-
-    def test_dataloader(self):
-        return DataLoader(
-            self.test_ds, batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers)
+class ImageClassificationPlotter():
+    def __init__(self, model, dm, classes=None):
+        self.model = model
+        self.dm = dm
+        self.classes = classes
 
     def plot_sample(self, ax, x, y, z=None):
         cmap = 'gray' if x.shape[0] == 1 else None
@@ -133,17 +111,14 @@ class ImageClassification(LightningModule):
             x = x[0]
         else:
             x = x.permute([1, 2, 0])
-        ax.imshow(x, cmap=cmap)
+        ax.imshow(x.numpy(), cmap=cmap)
 
-        y = self.classes[y]
+        y = self.classes[y] if self.classes else y
         title = str(y)
         if z is not None:
-            z = self.classes[z]
+            z = self.classes[z] if self.classes else z
             title += f' / {z}'
         ax.set_title(title)
-
-    def raw2pred(self, z):
-        return z.argmax(1)
 
     def plot_batch(self, x, y, z=None):
         batch_sz = x.shape[0]
@@ -170,43 +145,21 @@ class ImageClassification(LightningModule):
         os.makedirs(out_dir, exist_ok=True)
         for split in ['train', 'val', 'test']:
             out_path = None if out_dir is None else join(out_dir, f'{split}.png')
-            dl = getattr(self, f'{split}_dataloader')()
+            dl = getattr(self.dm, f'{split}_dataloader')()
             self.plot_dl(dl, out_path=out_path)
 
     def plot_predictions(self, out_path=None):
-        dl = self.val_dataloader()
-        self.eval()
+        dl = self.dm.val_dataloader()
+        self.model.eval()
         with torch.no_grad():
             x, y = next(iter(dl))
-            x = x.to(self.device)
-            z = self(x).cpu()
-            z = self.raw2pred(z)
+            x = x.to(self.model.device)
+            z = self.model(x).argmax(1).cpu()
             x = x.cpu()
         fig = self.plot_batch(x, y, z)
         if out_path is not None:
             fig.savefig(out_path)
 
-    @staticmethod
-    def add_model_specific_args(parent_parser):
-        parser = ArgumentParser(parents=[parent_parser], add_help=False)
-        parser.add_argument('--backbone', type=str, default='resnet18')
-        parser.add_argument('--train_ratio', type=float, default=0.8)
-        parser.add_argument('--seed', type=int, default=42)
-        parser.add_argument('--pretrained', type=bool, default=False)
-        parser.add_argument('--batch_size', type=int, default=128)
-        parser.add_argument('--num_workers', type=int, default=4)
-        parser.add_argument('--hidden_dim', type=int, default=128)
-        parser.add_argument('--data_dir', type=str, default='/opt/data/torch-cache/')
-        parser.add_argument('--learning_rate', type=float, default=0.1)
-        parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
-                            help='momentum')
-        parser.add_argument('--weight_decay', '--wd', default=5e-4, type=float,
-                            metavar='W', help='weight decay')
-        parser.add_argument('--predict_only', action='store_true', dest='predict_only')
-        parser.set_defaults(predict_only=False)
-        parser.add_argument('--sync_min_interval', type=int, default=180)
-
-        return parser
 
 def main(args):
     os.makedirs('/opt/data/tmp/', exist_ok=True)
@@ -221,20 +174,45 @@ def main(args):
 
         args.gpus = torch.cuda.device_count()
 
-        checkpoint_path = join(root_dir, 'last_epoch.ckpt')
+        checkpoint_path = join(root_dir, 'last.ckpt')
         if isfile(checkpoint_path):
             args.resume_from_checkpoint = checkpoint_path
+
+        dm = CIFAR10DataModule(
+            data_dir=args.data_dir, val_split=args.val_split,
+            num_workers=args.num_workers, batch_size=args.batch_size)
+        dm.train_transforms = T.Compose(
+            [
+                T.RandomCrop(32, padding=4),
+                T.RandomHorizontalFlip(),
+                T.ToTensor(),
+            ]
+        )
+        dm.val_transforms = T.Compose(
+            [
+                T.ToTensor(),
+            ]
+        )
+        dm.prepare_data()
+        dm.setup(stage='fit')
+        dm.setup(stage='test')
+
+        args.num_samples = dm.num_samples
+        args.num_classes = dm.num_classes
+        classes = dm.dataset_cls(args.data_dir, download=False).classes
 
         pl.seed_everything(args.seed)
         if args.resume_from_checkpoint:
             model = ImageClassification.load_from_checkpoint(args.resume_from_checkpoint)
         else:
             model = ImageClassification(args)
-        model.prepare_data()
+
+        plotter = ImageClassificationPlotter(model, dm, classes=classes)
 
         csv_logger = pl.loggers.CSVLogger(root_dir, 'csv')
         tb_logger = pl.loggers.TensorBoardLogger(root_dir, 'tb')
-        checkpoint_callback = ModelCheckpoint(root_dir, 'last_epoch')
+        checkpoint_callback = ModelCheckpoint(
+            root_dir, 'final_epoch', save_last=True)
         lr_monitor_callback = LearningRateMonitor()
         callbacks = [checkpoint_callback, lr_monitor_callback]
         if orig_root_dir.startswith('s3://'):
@@ -247,15 +225,15 @@ def main(args):
 
         if not args.predict_only:
             out_dir = join(root_dir, 'dataloaders')
-            model.plot_dataloaders(out_dir)
-            trainer.fit(model)
+            plotter.plot_dataloaders(out_dir)
+            trainer.fit(model, datamodule=dm)
 
-        test_metrics = trainer.test(model, test_dataloaders=model.test_dataloader())
+        test_metrics = trainer.test(model, datamodule=dm)
         out_path = join(root_dir, 'test-metrics.json')
         save_json(test_metrics, out_path)
 
         out_path = join(root_dir, 'predictions.png')
-        model.plot_predictions(out_path)
+        plotter.plot_predictions(out_path)
 
         if orig_root_dir.startswith('s3://'):
             s3_sync(root_dir, orig_root_dir)
