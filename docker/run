@@ -91,6 +91,7 @@ fi
 if [ "${BASH_SOURCE[0]}" = "${0}" ]
 then
     docker run ${RUNTIME} ${NAME} --rm -it \
+        --shm-size=8G \
         -v ${REPO_ROOT}/:/opt/src/ \
         -v $PTM_DATA_DIR:/opt/data \
         ${TENSORBOARD} ${AWS} ${JUPYTER} ${DEBUG} \
