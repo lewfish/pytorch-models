@@ -1,17 +1,19 @@
 # This trains a MoCo model on CIFAR10. It was adapted from:
 # https://colab.research.google.com/github/facebookresearch/moco/blob/colab-notebook/colab/moco_cifar10_demo.ipynb
 
-from os.path import join
+from os.path import join, basename
 import os
 import tempfile
 import sys
 from datetime import datetime
 from functools import partial
+from typing import OrderedDict
 from PIL import Image
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, Dataset
 from torchvision import transforms
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR10, ImageFolder
 from torchvision.models import resnet
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 import argparse
 import json
@@ -22,53 +24,74 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from pytorch_models.utils import save_json, s3_sync, batch_submit, S3SyncCallback
+from pytorch_models.utils import (
+    s3_cp, save_json, s3_sync, batch_submit, S3SyncCallback, unzip)
 
 
-class CIFAR10Pair(CIFAR10):
-    def __getitem__(self, index):
-        img = self.data[index]
-        img = Image.fromarray(img)
+# From https://github.com/facebookresearch/moco/blob/master/moco/loader.py
+class TwoCropsTransform:
+    """Take two random crops of one image as the query and key."""
 
-        if self.transform is not None:
-            im_1 = self.transform(img)
-            im_2 = self.transform(img)
+    def __init__(self, base_transform):
+        self.base_transform = base_transform
 
-        return im_1, im_2
+    def __call__(self, x):
+        q = self.base_transform(x)
+        k = self.base_transform(x)
+        return [q, k]
+
+
+class TransformedDataset(Dataset):
+    def __init__(self, dataset, transform):
+        self.dataset = dataset
+        self.transform = transform
+
+    def __getitem__(self, ind):
+        x, y = self.dataset[ind]
+        return self.transform(x), y
+
+    def __len__(self):
+        return len(self.dataset)
+
 
 def setup_data(args):
     os.makedirs(args.data_dir, exist_ok=True)
+    crop_size = 32 if args.dataset_type == 'cifar10' else 256
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(32),
+        transforms.RandomResizedCrop(crop_size),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
         transforms.RandomGrayscale(p=0.2),
         transforms.ToTensor(),
         transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+    train_transform = TwoCropsTransform(train_transform)
 
     test_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
 
-    # data prepare
-    train_data = CIFAR10Pair(root=args.data_dir, train=True, transform=train_transform, download=True)
-    memory_data = CIFAR10(root=args.data_dir, train=True, transform=test_transform, download=True)
-    test_data = CIFAR10(root=args.data_dir, train=False, transform=test_transform, download=True)
+    if args.dataset_type == 'cifar10':
+        train_data = CIFAR10(root=args.data_dir, train=True, transform=train_transform, download=True)
+        memory_data = CIFAR10(root=args.data_dir, train=True, transform=test_transform, download=True)
+        test_data = CIFAR10(root=args.data_dir, train=False, transform=test_transform, download=True)
+    else:
+        data = ImageFolder(root=args.dataset_uri)
+        inds = torch.randperm(len(data))
+        nb_train = int(len(data) * args.train_ratio)
+        train_data = TransformedDataset(Subset(data, inds[0:nb_train]), train_transform)
+        train_data.classes = data.classes
+        memory_data = TransformedDataset(Subset(data, inds[0:nb_train]), test_transform)
+        memory_data.classes = data.classes
+        test_data = TransformedDataset(Subset(data, inds[nb_train:]), test_transform)
+        test_data.classes = data.classes
+
     if args.fast_test:
         use_inds = list(range(args.batch_size))
         classes = train_data.classes
 
-        targets = train_data.targets
         train_data = Subset(train_data, use_inds)
-        train_data.targets = targets
-
-        targets = memory_data.targets
         memory_data = Subset(memory_data, use_inds)
-        memory_data.targets = targets
-
-        targets = test_data.targets
         test_data = Subset(test_data, use_inds)
-        test_data.targets = targets
 
         train_data.classes = classes
         memory_data.classes = classes
@@ -79,6 +102,79 @@ def setup_data(args):
     test_loader = DataLoader(test_data, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
 
     return train_loader, memory_loader, test_loader
+
+
+class DataPlotter():
+    def __init__(self, train_loader, memory_loader, test_loader):
+        self.train_loader = train_loader
+        self.memory_loader = memory_loader
+        self.test_loader = test_loader
+
+    def plot_sample(self, ax, x):
+        x = x.permute([1, 2, 0])
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3)
+        x = (x * std) + mean
+        ax.imshow(x.numpy())
+
+    def plot_batch(self, x, y, classes=None):
+        batch_sz = x.shape[0]
+        nrows = ncols = math.ceil(math.sqrt(batch_sz))
+        fig, axs = plt.subplots(nrows, ncols, squeeze=False, figsize=(2*nrows, 2*ncols))
+        axs = axs.flatten()
+        for ind, ax in enumerate(axs):
+            if ind < batch_sz:
+                ax = axs[ind]
+                self.plot_sample(ax, x[ind])
+                if classes:
+                    ax.set_title(classes[y[ind]])
+            ax.axis('off')
+
+        fig.tight_layout()
+        return fig
+
+    def plot_ssl_batch(self, x1, x2, y=None, classes=None):
+        batch_sz = x1.shape[0]
+        nrows = ncols = math.ceil(math.sqrt(batch_sz * 2))
+        fig, axs = plt.subplots(nrows, ncols, squeeze=False, figsize=(2*nrows, 2*ncols))
+        axs = axs.flatten()
+        for ind in range(batch_sz):
+            ax = axs[ind*2]
+            self.plot_sample(ax, x1[ind])
+            if classes and y is not None:
+                ax.set_title(classes[y[ind]])
+            ax.axis('off')
+
+            ax = axs[ind*2 + 1]
+            self.plot_sample(ax, x2[ind])
+            ax.axis('off')
+
+        fig.tight_layout()
+        return fig
+
+    def plot_dl(self, dl, out_path=None, batch_lim=16):
+        x, y = next(iter(dl))
+        classes = dl.dataset.classes
+
+        if isinstance(x, tuple) or isinstance(x, list):
+            x1, x2 = x
+            if x1.shape[0] > batch_lim:
+                x1 = x1[0:batch_lim]
+                x2 = x2[0:batch_lim]
+            fig = self.plot_ssl_batch(x1, x2, y, classes)
+        else:
+            if x.shape[0] > batch_lim:
+                x = x[0:batch_lim]
+            fig = self.plot_batch(x, y, classes)
+        if out_path is not None:
+            fig.savefig(out_path)
+
+    def plot_dataloaders(self, out_dir=None, batch_lim=16):
+        os.makedirs(out_dir, exist_ok=True)
+        for split in ['train', 'memory', 'test']:
+            out_path = None if out_dir is None else join(out_dir, f'{split}.png')
+            dl = getattr(self, f'{split}_loader')
+            self.plot_dl(dl, out_path=out_path, batch_lim=batch_lim)
 
 
 # SplitBatchNorm: simulate multi-gpu behavior of BatchNorm in one gpu by splitting alone the batch dimension
@@ -105,40 +201,18 @@ class SplitBatchNorm(nn.BatchNorm2d):
                 input, self.running_mean, self.running_var,
                 self.weight, self.bias, False, self.momentum, self.eps)
 
-class ModelBase(nn.Module):
-    """
-    Common CIFAR ResNet recipe.
-    Comparing with ImageNet ResNet recipe, it:
-    (i) replaces conv1 with kernel=3, str=1
-    (ii) removes pool1
-    """
-    def __init__(self, feature_dim=128, arch=None, bn_splits=16):
-        super(ModelBase, self).__init__()
-
-        # use split batchnorm
-        norm_layer = partial(SplitBatchNorm, num_splits=bn_splits) if bn_splits > 1 else nn.BatchNorm2d
-        resnet_arch = getattr(resnet, arch)
-        net = resnet_arch(num_classes=feature_dim, norm_layer=norm_layer)
-
-        self.net = []
-        for name, module in net.named_children():
-            if name == 'conv1':
-                module = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-            if isinstance(module, nn.MaxPool2d):
-                continue
-            if isinstance(module, nn.Linear):
-                self.net.append(nn.Flatten(1))
-            self.net.append(module)
-
-        self.net = nn.Sequential(*self.net)
-
-    def forward(self, x):
-        x = self.net(x)
-        # note: not normalized here
-        return x
+def build_backbone(feature_dim=128, arch=None, bn_splits=16, cifar_mode=False):
+    norm_layer = partial(SplitBatchNorm, num_splits=bn_splits) if bn_splits > 1 else nn.BatchNorm2d
+    resnet_arch = getattr(resnet, arch)
+    model = resnet_arch(num_classes=feature_dim, norm_layer=norm_layer)
+    if cifar_mode:
+        model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        model.maxpool = nn.Identity()
+    return model
 
 class ModelMoCo(nn.Module):
-    def __init__(self, dim=128, K=4096, m=0.99, T=0.1, arch='resnet18', bn_splits=8, symmetric=True):
+    def __init__(self, dim=128, K=4096, m=0.99, T=0.1, arch='resnet18', bn_splits=8,
+                 symmetric=True, cifar_mode=False, mlp=False, pretrained_uri=None):
         super(ModelMoCo, self).__init__()
 
         self.K = K
@@ -147,8 +221,24 @@ class ModelMoCo(nn.Module):
         self.symmetric = symmetric
 
         # create the encoders
-        self.encoder_q = ModelBase(feature_dim=dim, arch=arch, bn_splits=bn_splits)
-        self.encoder_k = ModelBase(feature_dim=dim, arch=arch, bn_splits=bn_splits)
+        self.encoder_q = build_backbone(
+            feature_dim=dim, arch=arch, bn_splits=bn_splits, cifar_mode=cifar_mode)
+        self.encoder_k = build_backbone(
+            feature_dim=dim, arch=arch, bn_splits=bn_splits, cifar_mode=cifar_mode)
+
+        if mlp:  # hack: brute-force replacement
+            dim_mlp = self.encoder_q.fc.weight.shape[1]
+            self.encoder_q.fc = nn.Sequential(
+                nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_q.fc)
+            self.encoder_k.fc = nn.Sequential(
+                nn.Linear(dim_mlp, dim_mlp), nn.ReLU(), self.encoder_k.fc)
+
+        if pretrained_uri:
+            state_dict = torch.load(pretrained_uri, map_location='cpu')['state_dict']
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                new_state_dict[k.replace('module.encoder_q.', '')] = v
+            self.encoder_q.load_state_dict(new_state_dict)
 
         for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
             param_k.data.copy_(param_q.data)  # initialize
@@ -187,7 +277,7 @@ class ModelMoCo(nn.Module):
         Batch shuffle, for making use of BatchNorm.
         """
         # random shuffle index
-        idx_shuffle = torch.randperm(x.shape[0])
+        idx_shuffle = torch.randperm(x.shape[0]).to(x.device)
 
         # index for restoring
         idx_unshuffle = torch.argsort(idx_shuffle)
@@ -268,7 +358,7 @@ def train(optimizer, net, data_loader, train_optimizer, epoch, args):
     adjust_learning_rate(optimizer, epoch, args)
 
     total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
-    for im_1, im_2 in train_bar:
+    for (im_1, im_2), _ in train_bar:
         im_1, im_2 = im_1.to(args.device, non_blocking=True), im_2.to(args.device, non_blocking=True)
 
         loss = net(im_1, im_2)
@@ -300,16 +390,18 @@ def test(net, memory_data_loader, test_data_loader, epoch, args):
     net.eval()
     classes = len(memory_data_loader.dataset.classes)
     total_top1, total_top5, total_num, feature_bank = 0.0, 0.0, 0, []
+    feature_labels = []
     with torch.no_grad():
         # generate feature bank
         for data, target in tqdm(memory_data_loader, desc='Feature extracting'):
             feature = net(data.to(args.device, non_blocking=True))
             feature = F.normalize(feature, dim=1)
             feature_bank.append(feature)
+            feature_labels.append(target)
         # [D, N]
         feature_bank = torch.cat(feature_bank, dim=0).t().contiguous()
         # [N]
-        feature_labels = torch.tensor(memory_data_loader.dataset.targets, device=feature_bank.device)
+        feature_labels = torch.tensor(torch.cat(feature_labels), device=feature_bank.device)
         # loop test data to predict the label by weighted knn search
         test_bar = tqdm(test_data_loader)
         for data, target in test_bar:
@@ -349,6 +441,11 @@ def knn_predict(feature, feature_bank, feature_labels, classes, knn_k, knn_t):
 
 def main(args, tmp_dir):
     train_loader, memory_loader, test_loader = setup_data(args)
+    if args.plot_dl:
+        plotter = DataPlotter(train_loader, memory_loader, test_loader)
+        plot_dir = join(args.root_dir, 'dataloaders')
+        plotter.plot_dataloaders(plot_dir)
+
     model = ModelMoCo(
             dim=args.moco_dim,
             K=args.moco_k,
@@ -357,6 +454,9 @@ def main(args, tmp_dir):
             arch=args.arch,
             bn_splits=args.bn_splits,
             symmetric=args.symmetric,
+            cifar_mode=args.cifar_mode,
+            mlp=args.mlp,
+            pretrained_uri=args.pretrained_uri
         ).to(args.device)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.wd, momentum=0.9)
 
@@ -420,8 +520,15 @@ def get_arg_parser():
 
     parser.add_argument('--resume', default='', type=str, metavar='PATH', help='path to latest checkpoint (default: none)')
     parser.add_argument('--root-dir', default='', type=str, metavar='PATH', help='path to cache (default: none)')
-    parser.add_argument('--data-dir', default='data', type=str, metavar='PATH', help='path to dataset cache (default: data)')
+    parser.add_argument('--data-dir', default='/opt/data/data-cache/', type=str, metavar='PATH', help='path to dataset cache (default: data)')
     parser.add_argument('--fast-test', action='store_true', help='run a fast test')
+    parser.add_argument('--cifar-mode', action='store_true', help='use resnet modified for cifar-sized images')
+    parser.add_argument('--mlp', action='store_true', help='use mlp for last layer aka mocov2')
+    parser.add_argument('--pretrained-uri', default='', type=str, metavar='PATH', help='URI of pretrained model')
+    parser.add_argument('--dataset-type', default='cifar10', type=str, metavar='DATASET_TYPE', help='type of dataset')
+    parser.add_argument('--dataset-uri', default='', type=str, metavar='DATASET_URI', help='URI of dataset')
+    parser.add_argument('--train-ratio', default=0.8, help='ratio of dataset to use for training')
+    parser.add_argument('--plot-dl', action='store_true', help='plot dataloaders')
 
     return parser
 
@@ -450,6 +557,21 @@ if __name__ == '__main__':
             s3_sync(root_dir, new_root_dir)
             root_dir = new_root_dir
             args.root_dir = root_dir
+
+        pretrained_uri = args.pretrained_uri
+        if pretrained_uri.startswith('s3://'):
+            new_pretrained_uri = join(tmp_dir, basename(pretrained_uri))
+            s3_cp(pretrained_uri, new_pretrained_uri)
+            args.pretrained_uri = new_pretrained_uri
+
+        dataset_uri = args.dataset_uri
+        if dataset_uri and dataset_uri.startswith('s3://'):
+            new_dataset_uri = join(tmp_dir, basename(dataset_uri))
+            s3_cp(dataset_uri, new_dataset_uri)
+            dataset_dir = join(args.data_dir, 'dataset')
+            unzip(new_dataset_uri, dataset_dir)
+            # TODO: rm new_dataset_uri
+            args.dataset_uri = dataset_dir
 
         main(args, tmp_dir)
 
