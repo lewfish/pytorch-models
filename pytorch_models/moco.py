@@ -56,7 +56,7 @@ class TransformedDataset(Dataset):
 
 def setup_data(args):
     os.makedirs(args.data_dir, exist_ok=True)
-    crop_size = 32 if args.dataset_type == 'cifar10' else 256
+    crop_size = 32 if args.dataset_type == 'cifar10' else 224
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(crop_size),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -479,7 +479,10 @@ def main(args, tmp_dir):
 
     # training loop
     for epoch in range(epoch_start, args.epochs + 1):
-        train_loss = train(optimizer, model, train_loader, optimizer, epoch, args)
+        if args.skip_train:
+            train_loss = 0.0
+        else:
+            train_loss = train(optimizer, model, train_loader, optimizer, epoch, args)
         results['train_loss'].append(train_loss)
         test_acc_1 = test(model.encoder_q, memory_loader, test_loader, epoch, args)
         results['test_acc@1'].append(test_acc_1)
@@ -529,6 +532,7 @@ def get_arg_parser():
     parser.add_argument('--dataset-uri', default='', type=str, metavar='DATASET_URI', help='URI of dataset')
     parser.add_argument('--train-ratio', default=0.8, help='ratio of dataset to use for training')
     parser.add_argument('--plot-dl', action='store_true', help='plot dataloaders')
+    parser.add_argument('--skip-train', action='store_true', help='skip training and just do eval')
 
     return parser
 

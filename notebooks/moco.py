@@ -21,6 +21,7 @@ args.mlp = True
 args.arch = 'resnet50'
 args.cifar_mode = False
 args.pretrained_uri = '/opt/data/research/ssl/checkpoints/moco_v2_800ep_pretrain.pth.tar'
+args.plot_dl = True
 
 args.device = 'cuda' if torch.cuda.device_count() > 0 else 'cpu'
 if args.fast_test:
@@ -43,7 +44,8 @@ args.mlp = True
 args.arch = 'resnet50'
 args.cifar_mode = False
 args.dataset_type = 'image_folder'
-args.dataset_uri = '/opt/data/research/ssl/resisc45/'
+# args.dataset_uri = '/opt/data/research/ssl/resisc45/'
+args.dataset_uri = 's3://research-lf-dev/ssl/datasets/resisc45.zip'
 args.pretrained_uri = '/opt/data/research/ssl/checkpoints/moco_v2_800ep_pretrain.pth.tar'
 args.plot_dl = True
 

@@ -29,6 +29,8 @@ RUN pip install pytorch-lightning-bolts==0.3.2 opencv-python==4.5.1.48
 RUN pip install torchvision==0.8.*
 RUN pip install s3fs==0.6.0
 
+RUN apt-get install unzip
+
 ENV PYTHONPATH=/opt/src/:$PYTHONPATH
 COPY notebooks /opt/src/notebooks/
 COPY pytorch_models /opt/src/pytorch_models/
