@@ -5,6 +5,7 @@ import boto3
 import os
 import time
 
+from torch.utils.data import Dataset
 from pytorch_lightning.callbacks import Callback
 
 def save_json(x, out_path):
@@ -65,3 +66,15 @@ class S3SyncCallback(Callback):
         if elapsed > self.min_interval:
             s3_sync(self.from_uri, self.to_uri)
             self.last_sync = time.time()
+
+class TransformedDataset(Dataset):
+    def __init__(self, dataset, transform):
+        self.dataset = dataset
+        self.transform = transform
+
+    def __getitem__(self, ind):
+        x, y = self.dataset[ind]
+        return self.transform(x), y
+
+    def __len__(self):
+        return len(self.dataset)

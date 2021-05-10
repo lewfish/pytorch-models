@@ -25,4 +25,28 @@ args.max_epochs = 1
 # args.resume_from_checkpoint = '/opt/data/lightning/mnist/last_epoch.ckpt'
 
 # %%
+parser = get_arg_parser()
+args = parser.parse_args(args=[])
+args.default_root_dir = '/opt/data/research/ssl/moco/fine-tune/output/'
+args.data_dir = '/opt/data/torch-cache'
+args.num_workers = 4
+args.batch_size = 16
+args.max_steps = 10
+args.limit_val_batches = 10
+args.limit_test_batches = 10
+args.fast_dev_run = False
+args.max_epochs = 1
+
+args.backbone = 'resnet50'
+args.cifar_mode = False
+args.dataset_type = 'image_folder'
+args.dataset_uri = '/opt/data/research/ssl/resisc45/'
+args.pretrained_uri = '/opt/data/research/ssl/moco/backbones/resisc_moco.pth'
+args.train_ratio = 0.8
+args.train_sz = 1000
+args.num_classes = 45
+
+# %%
 main(args)
+
+# %%

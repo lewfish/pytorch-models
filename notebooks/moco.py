@@ -58,6 +58,7 @@ tmp_dir = '/opt/data/tmp/tmp'
 main(args, tmp_dir)
 
 # %%
+
 data_dir = '/opt/data/research/ssl/resisc45/'
 from torchvision.datasets import ImageFolder
 from torch.utils.data import Subset
@@ -73,4 +74,31 @@ train_transform = transforms.Compose([
 
 ds = ImageFolder(data_dir, transform=train_transform)
 ds_subset = Subset(ds, list(range(10)))
+
+# %%
+from collections import OrderedDict
+
+def save_backbone(moco_path, backbone_path, key_header):
+    state_dict = torch.load(moco_path, map_location='cpu')['state_dict']
+    new_state_dict = OrderedDict()
+    for key, value in state_dict.items():
+        if key.startswith(key_header):
+            new_key = key[len(key_header):]
+            if not new_key.startswith('fc.'):
+                new_state_dict[new_key] = value
+    torch.save(new_state_dict, backbone_path)
+
+
+# %%
+moco_path = '/opt/data/research/ssl/checkpoints/resisc_moco.pth'
+backbone_path = '/opt/data/research/ssl/moco/backbones/resisc_moco.pth'
+key_header = 'encoder_q.'
+save_backbone(moco_path, backbone_path, key_header)
+
+# %%
+moco_path = '/opt/data/research/ssl/checkpoints/moco_v2_800ep_pretrain.pth.tar'
+backbone_path = '/opt/data/research/ssl/moco/backbones/imagenet_moco.pth'
+key_header = 'module.encoder_q.'
+save_backbone(moco_path, backbone_path, key_header)
+
 # %%

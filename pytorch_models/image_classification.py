@@ -1,9 +1,10 @@
 from argparse import ArgumentParser
 import math
-from os.path import join, isfile
+from os.path import join, isfile, basename
 import os
 import tempfile
 import sys
+from collections import OrderedDict
 
 import torch
 from torch.nn import functional as F
@@ -11,14 +12,15 @@ from torch.utils.data import DataLoader, Subset
 import torch.nn as nn
 from torch.optim.lr_scheduler import OneCycleLR
 import torchvision
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR10, ImageFolder
 from torchvision import transforms as T
 import matplotlib.pyplot as plt
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import pytorch_lightning as pl
 
-from pytorch_models.utils import save_json, s3_sync, batch_submit, S3SyncCallback
+from pytorch_models.utils import (
+    save_json, s3_sync, batch_submit, S3SyncCallback, s3_cp, unzip, TransformedDataset)
 
 class ImageClassification(LightningModule):
     def __init__(self, hparams):
@@ -26,15 +28,21 @@ class ImageClassification(LightningModule):
         self.hparams = hparams
 
         model_cls = getattr(torchvision.models, self.hparams.backbone)
-        model = model_cls(pretrained=self.hparams.pretrained, num_classes=10)
+        model = model_cls(num_classes=self.hparams.num_classes)
+
         # This model modification is needed for 32x32 images. It makes
         # accuracy go from about 85% to 93%. This should not be used if working with
         # large images!
         # Taken from https://github.com/PyTorchLightning/pytorch-lightning/blob/master/notebooks/07-cifar10-baseline.ipynb
-        model.conv1 = nn.Conv2d(3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
-        model.maxpool = nn.Identity()
-        self.model = model
+        if self.hparams.cifar_mode:
+            model.conv1 = nn.Conv2d(3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), bias=False)
+            model.maxpool = nn.Identity()
 
+        if self.hparams.pretrained_uri:
+            state_dict = torch.load(self.hparams.pretrained_uri, map_location='cpu')
+            model.load_state_dict(state_dict, strict=False)
+
+        self.model = model
         self.prepared_data = False
 
     def forward(self, x):
@@ -81,34 +89,65 @@ class ImageClassification(LightningModule):
 
     def prepare_data(self):
         if not self.prepared_data:
-            train_transform = T.Compose(
-                [
-                    T.RandomCrop(32, padding=4),
-                    T.RandomHorizontalFlip(),
+            args = self.hparams
+            if args.dataset_type == 'cifar10':
+                train_transform = T.Compose(
+                    [
+                        T.RandomCrop(32, padding=4),
+                        T.RandomHorizontalFlip(),
+                        T.ToTensor(),
+                        T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+                    ]
+                )
+                test_transform = T.Compose(
+                    [
+                        T.ToTensor(),
+                        T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+                    ]
+                )
+                self.full_dataset = CIFAR10(
+                    args.data_dir, train=True, download=True)
+                self.classes = self.full_dataset.classes
+                train_len = int(round(len(self.full_dataset) * args.train_ratio))
+                inds = torch.randperm(len(self.full_dataset))
+                # TODO handle train_sz
+                train_inds = inds[0:train_len]
+                val_inds = inds[train_len:]
+                self.train_ds = Subset(CIFAR10(
+                    args.data_dir, train=True, download=True, transform=train_transform),
+                    train_inds)
+                self.val_ds = Subset(CIFAR10(
+                    args.data_dir, train=True, download=True, transform=test_transform),
+                    val_inds)
+                self.test_ds = CIFAR10(
+                    args.data_dir, train=False, download=True,
+                    transform=test_transform)
+            else:
+                train_transform = T.Compose([
+                    T.RandomResizedCrop(224),
+                    T.RandomHorizontalFlip(p=0.5),
+                    T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+                    T.RandomGrayscale(p=0.2),
                     T.ToTensor(),
-                ]
-            )
-            test_transform = T.Compose(
-                [
+                    T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+
+                test_transform = T.Compose([
                     T.ToTensor(),
-                ]
-            )
-            self.full_dataset = CIFAR10(
-                self.hparams.data_dir, train=True, download=True)
-            self.classes = self.full_dataset.classes
-            train_len = int(round(len(self.full_dataset) * self.hparams.train_ratio))
-            inds = torch.randperm(len(self.full_dataset))
-            train_inds = inds[0:train_len]
-            val_inds = inds[train_len:]
-            self.train_ds = Subset(CIFAR10(
-                self.hparams.data_dir, train=True, download=True, transform=train_transform),
-                train_inds)
-            self.val_ds = Subset(CIFAR10(
-                self.hparams.data_dir, train=True, download=True, transform=test_transform),
-                val_inds)
-            self.test_ds = CIFAR10(
-                self.hparams.data_dir, train=False, download=True,
-                transform=test_transform)
+                    T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+
+                data = ImageFolder(root=args.dataset_uri)
+                torch.manual_seed(1234)
+                inds = torch.randperm(len(data))
+                test_start = int(len(data) * args.train_ratio)
+                train_sz = test_start if args.train_sz == -1 else min(args.train_sz, test_start)
+                train_data = TransformedDataset(Subset(data, inds[0:train_sz]), train_transform)
+                train_data.classes = data.classes
+                test_data = TransformedDataset(Subset(data, inds[test_start:]), test_transform)
+                test_data.classes = data.classes
+                self.classes = data.classes
+                val_data = test_data
+
+                self.train_ds, self.val_ds, self.test_ds = train_data, val_data, test_data
 
             self.prepared_data = True
 
@@ -192,7 +231,6 @@ class ImageClassification(LightningModule):
         parser.add_argument('--backbone', type=str, default='resnet18')
         parser.add_argument('--train_ratio', type=float, default=0.8)
         parser.add_argument('--seed', type=int, default=42)
-        parser.add_argument('--pretrained', type=bool, default=False)
         parser.add_argument('--batch_size', type=int, default=128)
         parser.add_argument('--num_workers', type=int, default=4)
         parser.add_argument('--hidden_dim', type=int, default=128)
@@ -205,6 +243,13 @@ class ImageClassification(LightningModule):
         parser.add_argument('--predict_only', action='store_true', dest='predict_only')
         parser.set_defaults(predict_only=False)
         parser.add_argument('--sync_min_interval', type=int, default=180)
+        parser.add_argument('--cifar-mode', action='store_true', help='use resnet modified for cifar-sized images')
+        parser.add_argument('--pretrained-uri', default='', type=str, metavar='PATH', help='URI of pretrained model')
+        parser.add_argument('--dataset-type', default='cifar10', type=str, metavar='DATASET_TYPE', help='type of dataset')
+        parser.add_argument('--dataset-uri', default='', type=str, metavar='DATASET_URI', help='URI of dataset')
+        parser.add_argument('--num-classes', default=10, type=int)
+        parser.add_argument('--train-ratio', default=0.8, help='ratio of dataset to use for training with image_folder')
+        parser.add_argument('--train-sz', default=-1, help='max number of train samples to use after applying train_ratio')
 
         return parser
 
@@ -218,6 +263,21 @@ def main(args):
             s3_sync(root_dir, new_root_dir)
             root_dir = new_root_dir
             args.default_root_dir = root_dir
+
+        pretrained_uri = args.pretrained_uri
+        if pretrained_uri.startswith('s3://'):
+            new_pretrained_uri = join(tmp_dir, basename(pretrained_uri))
+            s3_cp(pretrained_uri, new_pretrained_uri)
+            args.pretrained_uri = new_pretrained_uri
+
+        dataset_uri = args.dataset_uri
+        if dataset_uri and dataset_uri.startswith('s3://'):
+            new_dataset_uri = join(tmp_dir, basename(dataset_uri))
+            s3_cp(dataset_uri, new_dataset_uri)
+            dataset_dir = join(args.data_dir, 'dataset')
+            unzip(new_dataset_uri, dataset_dir)
+            # TODO: rm new_dataset_uri
+            args.dataset_uri = dataset_dir
 
         args.gpus = torch.cuda.device_count()
 

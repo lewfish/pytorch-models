@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from pytorch_models.utils import (
-    s3_cp, save_json, s3_sync, batch_submit, S3SyncCallback, unzip)
+    s3_cp, save_json, s3_sync, batch_submit, S3SyncCallback, unzip, TransformedDataset)
 
 
 # From https://github.com/facebookresearch/moco/blob/master/moco/loader.py
@@ -41,20 +41,7 @@ class TwoCropsTransform:
         return [q, k]
 
 
-class TransformedDataset(Dataset):
-    def __init__(self, dataset, transform):
-        self.dataset = dataset
-        self.transform = transform
-
-    def __getitem__(self, ind):
-        x, y = self.dataset[ind]
-        return self.transform(x), y
-
-    def __len__(self):
-        return len(self.dataset)
-
-
-def setup_data(args):
+def setup_data(args, two_crops=True):
     os.makedirs(args.data_dir, exist_ok=True)
     crop_size = 32 if args.dataset_type == 'cifar10' else 224
     train_transform = transforms.Compose([
@@ -64,7 +51,9 @@ def setup_data(args):
         transforms.RandomGrayscale(p=0.2),
         transforms.ToTensor(),
         transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
-    train_transform = TwoCropsTransform(train_transform)
+
+    if two_crops:
+        train_transform = TwoCropsTransform(train_transform)
 
     test_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -76,6 +65,7 @@ def setup_data(args):
         test_data = CIFAR10(root=args.data_dir, train=False, transform=test_transform, download=True)
     else:
         data = ImageFolder(root=args.dataset_uri)
+        torch.manual_seed(1234)
         inds = torch.randperm(len(data))
         nb_train = int(len(data) * args.train_ratio)
         train_data = TransformedDataset(Subset(data, inds[0:nb_train]), train_transform)
@@ -249,6 +239,16 @@ class ModelMoCo(nn.Module):
         self.queue = nn.functional.normalize(self.queue, dim=0)
 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+
+    def save_backbone(self, out_path):
+        state_dict = self.encoder_q.state_dict()
+
+        new_state_dict = OrderedDict()
+        for key, value in state_dict.items():
+            if not key.startswith('fc.'):
+                new_state_dict[key] = value
+
+        torch.save(new_state_dict, out_path)
 
     @torch.no_grad()
     def _momentum_update_key_encoder(self):
@@ -491,7 +491,7 @@ def main(args, tmp_dir):
         data_frame.to_csv(args.root_dir + '/log.csv', index_label='epoch')
         # save model
         torch.save({'epoch': epoch, 'state_dict': model.state_dict(), 'optimizer' : optimizer.state_dict(),}, args.root_dir + '/model_last.pth')
-
+    model.save_backbone(join(args.root_dir, 'backbone.pth'))
 
 def get_arg_parser():
     parser = argparse.ArgumentParser(description='Train MoCo on CIFAR-10')
