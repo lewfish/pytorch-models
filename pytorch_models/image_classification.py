@@ -147,6 +147,10 @@ class ImageClassification(LightningModule):
                 self.classes = data.classes
                 val_data = test_data
 
+                print(f'train sz: {len(train_data)}')
+                print(f'test sz: {len(test_data)}')
+                print(f'batch size: {self.hparams.batch_size}')
+
                 self.train_ds, self.val_ds, self.test_ds = train_data, val_data, test_data
 
             self.prepared_data = True
@@ -248,8 +252,8 @@ class ImageClassification(LightningModule):
         parser.add_argument('--dataset-type', default='cifar10', type=str, metavar='DATASET_TYPE', help='type of dataset')
         parser.add_argument('--dataset-uri', default='', type=str, metavar='DATASET_URI', help='URI of dataset')
         parser.add_argument('--num-classes', default=10, type=int)
-        parser.add_argument('--train-ratio', default=0.8, help='ratio of dataset to use for training with image_folder')
-        parser.add_argument('--train-sz', default=-1, help='max number of train samples to use after applying train_ratio')
+        parser.add_argument('--train-ratio', default=0.8, type=float, help='ratio of dataset to use for training with image_folder')
+        parser.add_argument('--train-sz', default=-1, type=int, help='max number of train samples to use after applying train_ratio')
 
         return parser
 

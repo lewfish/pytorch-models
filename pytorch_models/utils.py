@@ -24,7 +24,7 @@ def s3_cp(from_uri, to_uri):
 
 def unzip(zip_path, dest_dir):
     os.makedirs(dest_dir, exist_ok=True)
-    cmd = ['unzip', zip_path, '-q', '-d', dest_dir]
+    cmd = ['unzip', zip_path, '-d', dest_dir]
     subprocess.run(cmd)
 
 def batch_submit(command, attempts=3):

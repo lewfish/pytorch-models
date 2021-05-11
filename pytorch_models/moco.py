@@ -19,6 +19,9 @@ import argparse
 import json
 import math
 import os
+import random
+
+from PIL import ImageFilter
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -40,6 +43,16 @@ class TwoCropsTransform:
         k = self.base_transform(x)
         return [q, k]
 
+class GaussianBlur(object):
+    """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
+
+    def __init__(self, sigma=[.1, 2.]):
+        self.sigma = sigma
+
+    def __call__(self, x):
+        sigma = random.uniform(self.sigma[0], self.sigma[1])
+        x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
+        return x
 
 def setup_data(args, two_crops=True):
     os.makedirs(args.data_dir, exist_ok=True)
@@ -49,15 +62,16 @@ def setup_data(args, two_crops=True):
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
         transforms.RandomGrayscale(p=0.2),
+        transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
         transforms.ToTensor(),
-        transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+        transforms.Normalize(args.image_mean, args.image_std)])
 
     if two_crops:
         train_transform = TwoCropsTransform(train_transform)
 
     test_transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+        transforms.Normalize(args.image_mean, args.image_std)])
 
     if args.dataset_type == 'cifar10':
         train_data = CIFAR10(root=args.data_dir, train=True, transform=train_transform, download=True)
@@ -95,15 +109,19 @@ def setup_data(args, two_crops=True):
 
 
 class DataPlotter():
-    def __init__(self, train_loader, memory_loader, test_loader):
+    def __init__(self, train_loader, memory_loader, test_loader, batch_lim=16,
+                 image_mean=[0.4914, 0.4822, 0.4465], image_std=[0.2023, 0.1994, 0.2010]):
         self.train_loader = train_loader
         self.memory_loader = memory_loader
         self.test_loader = test_loader
+        self.batch_lim = batch_lim
+        self.image_mean = image_mean
+        self.image_std = image_std
 
     def plot_sample(self, ax, x):
         x = x.permute([1, 2, 0])
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3)
-        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 1, 3)
+        mean = torch.tensor(self.image_mean).view(1, 1, 3)
+        std = torch.tensor(self.image_std).view(1, 1, 3)
         x = (x * std) + mean
         ax.imshow(x.numpy())
 
@@ -142,9 +160,10 @@ class DataPlotter():
         fig.tight_layout()
         return fig
 
-    def plot_dl(self, dl, out_path=None, batch_lim=16):
+    def plot_dl(self, dl, out_path=None):
         x, y = next(iter(dl))
         classes = dl.dataset.classes
+        batch_lim = self.batch_lim
 
         if isinstance(x, tuple) or isinstance(x, list):
             x1, x2 = x
@@ -159,12 +178,12 @@ class DataPlotter():
         if out_path is not None:
             fig.savefig(out_path)
 
-    def plot_dataloaders(self, out_dir=None, batch_lim=16):
+    def plot_dataloaders(self, out_dir=None):
         os.makedirs(out_dir, exist_ok=True)
         for split in ['train', 'memory', 'test']:
             out_path = None if out_dir is None else join(out_dir, f'{split}.png')
             dl = getattr(self, f'{split}_loader')
-            self.plot_dl(dl, out_path=out_path, batch_lim=batch_lim)
+            self.plot_dl(dl, out_path=out_path)
 
 
 # SplitBatchNorm: simulate multi-gpu behavior of BatchNorm in one gpu by splitting alone the batch dimension
@@ -442,7 +461,9 @@ def knn_predict(feature, feature_bank, feature_labels, classes, knn_k, knn_t):
 def main(args, tmp_dir):
     train_loader, memory_loader, test_loader = setup_data(args)
     if args.plot_dl:
-        plotter = DataPlotter(train_loader, memory_loader, test_loader)
+        plotter = DataPlotter(
+            train_loader, memory_loader, test_loader, image_mean=args.image_mean,
+            image_std=args.image_std)
         plot_dir = join(args.root_dir, 'dataloaders')
         plotter.plot_dataloaders(plot_dir)
 
@@ -533,7 +554,8 @@ def get_arg_parser():
     parser.add_argument('--train-ratio', default=0.8, help='ratio of dataset to use for training')
     parser.add_argument('--plot-dl', action='store_true', help='plot dataloaders')
     parser.add_argument('--skip-train', action='store_true', help='skip training and just do eval')
-
+    parser.add_argument('--image-mean', default=[0.4914, 0.4822, 0.4465], nargs='3', type=float, help='image mean')
+    parser.add_argument('--image-std', default=[0.2023, 0.1994, 0.2010], nargs='3', type=float, help='image std')
     return parser
 
 if __name__ == '__main__':
