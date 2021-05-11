@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import pytorch_lightning as pl
+from torchvision.transforms.transforms import CenterCrop
 
 from pytorch_models.utils import (
     save_json, s3_sync, batch_submit, S3SyncCallback, s3_cp, unzip, TransformedDataset)
@@ -96,13 +97,13 @@ class ImageClassification(LightningModule):
                         T.RandomCrop(32, padding=4),
                         T.RandomHorizontalFlip(),
                         T.ToTensor(),
-                        T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+                        T.Normalize(args.image_mean, args.image_std)
                     ]
                 )
                 test_transform = T.Compose(
                     [
                         T.ToTensor(),
-                        T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+                        T.Normalize(args.image_mean, args.image_std)
                     ]
                 )
                 self.full_dataset = CIFAR10(
@@ -126,14 +127,14 @@ class ImageClassification(LightningModule):
                 train_transform = T.Compose([
                     T.RandomResizedCrop(224),
                     T.RandomHorizontalFlip(p=0.5),
-                    T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-                    T.RandomGrayscale(p=0.2),
                     T.ToTensor(),
-                    T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+                    T.Normalize(args.image_mean, args.image_std)])
 
                 test_transform = T.Compose([
+                    T.Resize(256),
+                    T.CenterCrop(224),
                     T.ToTensor(),
-                    T.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])])
+                    T.Normalize(args.image_mean, args.image_std)])
 
                 data = ImageFolder(root=args.dataset_uri)
                 torch.manual_seed(1234)
@@ -254,6 +255,8 @@ class ImageClassification(LightningModule):
         parser.add_argument('--num-classes', default=10, type=int)
         parser.add_argument('--train-ratio', default=0.8, type=float, help='ratio of dataset to use for training with image_folder')
         parser.add_argument('--train-sz', default=-1, type=int, help='max number of train samples to use after applying train_ratio')
+        parser.add_argument('--image-mean', default=[0.4914, 0.4822, 0.4465], nargs=3, type=float, help='image mean')
+        parser.add_argument('--image-std', default=[0.2023, 0.1994, 0.2010], nargs=3, type=float, help='image std')
 
         return parser
 

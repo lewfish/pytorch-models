@@ -467,6 +467,7 @@ def main(args, tmp_dir):
         plot_dir = join(args.root_dir, 'dataloaders')
         plotter.plot_dataloaders(plot_dir)
 
+    # TODO save args
     model = ModelMoCo(
             dim=args.moco_dim,
             K=args.moco_k,
@@ -554,8 +555,8 @@ def get_arg_parser():
     parser.add_argument('--train-ratio', default=0.8, help='ratio of dataset to use for training')
     parser.add_argument('--plot-dl', action='store_true', help='plot dataloaders')
     parser.add_argument('--skip-train', action='store_true', help='skip training and just do eval')
-    parser.add_argument('--image-mean', default=[0.4914, 0.4822, 0.4465], nargs='3', type=float, help='image mean')
-    parser.add_argument('--image-std', default=[0.2023, 0.1994, 0.2010], nargs='3', type=float, help='image std')
+    parser.add_argument('--image-mean', default=[0.4914, 0.4822, 0.4465], nargs=3, type=float, help='image mean')
+    parser.add_argument('--image-std', default=[0.2023, 0.1994, 0.2010], nargs=3, type=float, help='image std')
     return parser
 
 if __name__ == '__main__':
