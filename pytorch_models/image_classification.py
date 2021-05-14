@@ -211,7 +211,11 @@ class ImageClassification(LightningModule):
             x = x[0]
         else:
             x = x.permute([1, 2, 0])
-        ax.imshow(x, cmap=cmap)
+
+        mean = torch.tensor(self.hparams.image_mean).view(1, 1, 3)
+        std = torch.tensor(self.hparams.image_std).view(1, 1, 3)
+        x = (x * std) + mean
+        ax.imshow(x.numpy(), cmap=cmap)
 
         y = self.classes[y]
         title = str(y)
