@@ -20,6 +20,10 @@ args.limit_val_batches = 10
 args.limit_test_batches = 10
 args.fast_dev_run = False
 args.max_epochs = 1
+args.head_lr = 0.1
+args.learning_rate = 0.01
+args.milestones = [1, 2]
+args.milestone_scheduler = True
 
 # args.predict_only = True
 # args.resume_from_checkpoint = '/opt/data/lightning/mnist/last_epoch.ckpt'
@@ -40,12 +44,14 @@ args.max_epochs = 1
 args.backbone = 'resnet50'
 args.cifar_mode = False
 args.dataset_type = 'image_folder'
-# args.dataset_uri = '/opt/data/research/ssl/resisc45/'
-args.dataset_uri = 's3://research-lf-dev/ssl/datasets/resisc45.zip'
+args.dataset_uri = '/opt/data/research/ssl/resisc45/'
 args.pretrained_uri = '/opt/data/research/ssl/moco/backbones/resisc_moco.pth'
+# args.pretrained_uri = '/opt/data/research/ssl/moco/backbones/imagenet_moco.pth'
+# args.pretrained = True
 args.train_ratio = 0.8
 args.train_sz = 1000
 args.num_classes = 45
+args.freeze_backbone = True
 
 # %%
 main(args)

@@ -10,7 +10,7 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Subset
 import torch.nn as nn
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import MultiStepLR, OneCycleLR
 import torchvision
 from torchvision.datasets import CIFAR10, ImageFolder
 from torchvision import transforms as T
@@ -29,7 +29,8 @@ class ImageClassification(LightningModule):
         self.hparams = hparams
 
         model_cls = getattr(torchvision.models, self.hparams.backbone)
-        model = model_cls(num_classes=self.hparams.num_classes)
+        model = model_cls(pretrained=self.hparams.pretrained)
+        model.fc = nn.Linear(model.fc.in_features, self.hparams.num_classes)
 
         # This model modification is needed for 32x32 images. It makes
         # accuracy go from about 85% to 93%. This should not be used if working with
@@ -41,7 +42,15 @@ class ImageClassification(LightningModule):
 
         if self.hparams.pretrained_uri:
             state_dict = torch.load(self.hparams.pretrained_uri, map_location='cpu')
-            model.load_state_dict(state_dict, strict=False)
+            msg = model.load_state_dict(state_dict, strict=False)
+            assert set(msg.missing_keys) == {'fc.weight', 'fc.bias'}
+
+        '''
+        if self.hparams.freeze_backbone:
+            for param in model.parameters():
+                param.requires_grad = False
+            model.fc.requires_grad = True
+        '''
 
         self.model = model
         self.prepared_data = False
@@ -77,15 +86,40 @@ class ImageClassification(LightningModule):
             self.train_steps = (self.hparams.max_epochs * train_batches) // self.hparams.accumulate_grad_batches
 
     def configure_optimizers(self):
+        backbone_layers = list(self.model.children())[:-1]
+        backbone = nn.Sequential(*backbone_layers)
+        head = self.model.fc
+
+        params = self.model.parameters()
+        if self.hparams.freeze_backbone:
+            params = head.parameters()
+        elif self.hparams.head_lr != -1.0:
+            params = [
+                {
+                    'params': head.parameters(),
+                    'lr': self.hparams.head_lr
+                },
+                {
+                    'params': backbone.parameters(),
+                }
+            ]
         optimizer = torch.optim.SGD(
-            self.parameters(), lr=self.hparams.learning_rate,
+            params, lr=self.hparams.learning_rate,
             momentum=self.hparams.momentum,
             weight_decay=self.hparams.weight_decay)
-        scheduler_dict = {
-            'scheduler': OneCycleLR(
-                optimizer, self.hparams.learning_rate, total_steps=self.train_steps),
-            'interval': 'step',
-        }
+
+        if self.hparams.milestone_scheduler:
+            scheduler_dict = {
+                'scheduler': MultiStepLR(optimizer, self.hparams.milestones),
+                'interval': 'epoch',
+            }
+        else:
+            lrs = [group['lr'] for group in optimizer.param_groups]
+            scheduler_dict = {
+                'scheduler': OneCycleLR(
+                    optimizer, lrs, total_steps=self.train_steps),
+                'interval': 'step',
+            }
         return {'optimizer': optimizer, 'lr_scheduler': scheduler_dict}
 
     def prepare_data(self):
@@ -241,6 +275,7 @@ class ImageClassification(LightningModule):
         parser.add_argument('--hidden_dim', type=int, default=128)
         parser.add_argument('--data_dir', type=str, default='/opt/data/torch-cache/')
         parser.add_argument('--learning_rate', type=float, default=0.1)
+        parser.add_argument('--head-lr', default=-1.0, type=float, help='learning rate for head')
         parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                             help='momentum')
         parser.add_argument('--weight_decay', '--wd', default=5e-4, type=float,
@@ -257,7 +292,10 @@ class ImageClassification(LightningModule):
         parser.add_argument('--train-sz', default=-1, type=int, help='max number of train samples to use after applying train_ratio')
         parser.add_argument('--image-mean', default=[0.4914, 0.4822, 0.4465], nargs=3, type=float, help='image mean')
         parser.add_argument('--image-std', default=[0.2023, 0.1994, 0.2010], nargs=3, type=float, help='image std')
-
+        parser.add_argument('--pretrained', action='store_true', help='use supervised imagenet pretrained model')
+        parser.add_argument('--freeze-backbone', action='store_true', help='freeze backbone')
+        parser.add_argument('--milestones', default=[120, 160], nargs='*', type=int, help='learning rate schedule (when to drop lr by 10x); only used if using --milestone-scheduler')
+        parser.add_argument('--milestone-scheduler', action='store_true', help='')
         return parser
 
 def main(args):

@@ -467,7 +467,7 @@ def main(args, tmp_dir):
         plot_dir = join(args.root_dir, 'dataloaders')
         plotter.plot_dataloaders(plot_dir)
 
-    # TODO save args
+    save_json(args.__dict__, join(args.root_dir, 'args.json'))
     model = ModelMoCo(
             dim=args.moco_dim,
             K=args.moco_k,
