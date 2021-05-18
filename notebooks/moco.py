@@ -83,3 +83,9 @@ key_header = 'module.encoder_q.'
 save_backbone(moco_path, backbone_path, key_header)
 
 # %%
+moco_path = '/opt/data/research/ssl/checkpoints/crjd_resisc_5kiters_moco800.pth'
+backbone_path = '/opt/data/research/ssl/moco/backbones/crjd_resisc_5kiters_moco800_backbone.pth'
+key_header = 'backbone.'
+save_backbone(moco_path, backbone_path, key_header)
+
+# %%
