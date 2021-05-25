@@ -32,7 +32,6 @@ tmp_dir = '/opt/data/tmp/tmp'
 main(args, tmp_dir)
 
 # %%
-
 # resisc45
 
 parser = get_arg_parser()
@@ -47,6 +46,7 @@ args.dataset_type = 'image_folder'
 args.dataset_uri = '/opt/data/research/ssl/resisc45/'
 args.pretrained_uri = '/opt/data/research/ssl/checkpoints/moco_v2_800ep_pretrain.pth.tar'
 args.plot_dl = True
+args.grad_accum_steps = 1
 
 args.device = 'cuda' if torch.cuda.device_count() > 0 else 'cpu'
 if args.fast_test:

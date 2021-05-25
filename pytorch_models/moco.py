@@ -377,14 +377,21 @@ def train(optimizer, net, data_loader, train_optimizer, epoch, args):
     adjust_learning_rate(optimizer, epoch, args)
 
     total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
-    for (im_1, im_2), _ in train_bar:
+    steps = len(data_loader)
+    max_steps = (steps // args.grad_accum_steps) * args.grad_accum_steps
+    train_optimizer.zero_grad()
+
+    for step, ((im_1, im_2), _) in enumerate(train_bar):
+        if (step + 1) > max_steps:
+            break
+
         im_1, im_2 = im_1.to(args.device, non_blocking=True), im_2.to(args.device, non_blocking=True)
 
         loss = net(im_1, im_2)
-
-        train_optimizer.zero_grad()
         loss.backward()
-        train_optimizer.step()
+        if ((step + 1) % args.grad_accum_steps) == 0:
+            train_optimizer.step()
+            train_optimizer.zero_grad()
 
         total_num += data_loader.batch_size
         total_loss += loss.item() * data_loader.batch_size
@@ -557,6 +564,8 @@ def get_arg_parser():
     parser.add_argument('--skip-train', action='store_true', help='skip training and just do eval')
     parser.add_argument('--image-mean', default=[0.4914, 0.4822, 0.4465], nargs=3, type=float, help='image mean')
     parser.add_argument('--image-std', default=[0.2023, 0.1994, 0.2010], nargs=3, type=float, help='image std')
+    parser.add_argument('--grad-accum-steps', default=1, type=int)
+
     return parser
 
 if __name__ == '__main__':
