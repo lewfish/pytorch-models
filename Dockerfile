@@ -29,9 +29,20 @@ RUN pip install pytorch-lightning-bolts==0.3.2 opencv-python==4.5.1.48
 RUN pip install torchvision==0.8.*
 RUN pip install s3fs==0.6.0
 
+# From https://vissl.readthedocs.io/en/v0.1.5/installation.html
+RUN apt-get -y install git
+RUN mkdir /tmp/vissl/ && \
+    cd /tmp/vissl/ && \
+    git clone --recursive https://github.com/facebookresearch/vissl.git && \
+    cd vissl && \
+    pip install --progress-bar off -r requirements.txt && \
+    pip install classy-vision@https://github.com/facebookresearch/ClassyVision/tarball/master && \
+    pip install -e .[dev]
+
 ENV PYTHONPATH=/opt/src/:$PYTHONPATH
 COPY notebooks /opt/src/notebooks/
 COPY pytorch_models /opt/src/pytorch_models/
+COPY configs /opt/src/configs/
 WORKDIR /opt/src
 
 CMD ["bash"]
