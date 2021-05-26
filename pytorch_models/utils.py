@@ -21,6 +21,11 @@ def s3_cp(from_uri, to_uri):
     print(f'Copying from {from_uri} to {to_uri}...')
     subprocess.run(cmd)
 
+def unzip(zip_path, dest_dir):
+    os.makedirs(dest_dir, exist_ok=True)
+    cmd = ['unzip', '-qq', zip_path, '-d', dest_dir]
+    subprocess.run(cmd)
+
 def batch_submit(command, attempts=3):
     job_def = os.environ['JOB_DEF']
     job_queue = os.environ['JOB_QUEUE']

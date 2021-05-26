@@ -38,6 +38,7 @@ RUN mkdir /opt/vissl/ && \
     pip install --progress-bar off -r requirements.txt && \
     pip install classy-vision@https://github.com/facebookresearch/ClassyVision/tarball/master && \
     pip install -e .[dev]
+RUN apt-get -y install unzip
 
 ENV PYTHONPATH=/opt/src/:$PYTHONPATH
 COPY notebooks /opt/src/notebooks/
