@@ -31,8 +31,8 @@ RUN pip install s3fs==0.6.0
 
 # From https://vissl.readthedocs.io/en/v0.1.5/installation.html
 RUN apt-get -y install git
-RUN mkdir /tmp/vissl/ && \
-    cd /tmp/vissl/ && \
+RUN mkdir /opt/vissl/ && \
+    cd /opt/vissl/ && \
     git clone --recursive https://github.com/facebookresearch/vissl.git && \
     cd vissl && \
     pip install --progress-bar off -r requirements.txt && \
