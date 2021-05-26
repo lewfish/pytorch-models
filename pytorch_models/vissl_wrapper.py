@@ -1,7 +1,21 @@
 import sys
-from pytorch_models.utils import save_json, s3_sync, batch_submit, S3SyncCallback
+import argparse
+
+from pytorch_models.utils import s3_sync, s3_cp, batch_submit
+
+
+def get_arg_parser():
+    parser = argparse.ArgumentParser(description='Run VISSL')
+    parser.add_argument('--config', default='')
+    parser.add_argument('--output-uri', default='')
+    parser.add_argument('--init-weights', default='')
+    return parser
+
 
 def main(args):
+    # download data zip file and unzip to a tmp_dir
+    # make an output dir
+    # download init weights
     cmd = [
         'python',
         '/tmp/vissl/tools/run_distributed_engines.py',
@@ -11,6 +25,7 @@ def main(args):
         f'config.CHECKPOINT.DIR="{output_dir}"]',
         f'config.MODEL.WEIGHTS_INIT.PARAMS_FILE="{weights_path}"'
     ]
+    # sync output_dir to output_uri
 
 if __name__ == '__main__':
     command = sys.argv
