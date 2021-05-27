@@ -10,15 +10,14 @@ from pytorch_models.utils import s3_sync, s3_cp, batch_submit, unzip
 
 
 # From https://stackoverflow.com/questions/4417546/constantly-print-subprocess-output-while-process-is-running
-def execute(cmd, raise_error=False):
+def execute(cmd):
     popen = subprocess.Popen(cmd, stdout=subprocess.PIPE, universal_newlines=True)
     for stdout_line in iter(popen.stdout.readline, ""):
         yield stdout_line
     popen.stdout.close()
     return_code = popen.wait()
-    if return_code and raise_error:
+    if return_code:
         raise subprocess.CalledProcessError(return_code, cmd)
-
 
 def run_vissl(config, dataset_dir, output_dir, pretrained_path=None):
     train_dir = join(dataset_dir, 'train')
@@ -36,7 +35,6 @@ def run_vissl(config, dataset_dir, output_dir, pretrained_path=None):
 
     for line in execute(cmd):
         print(line, end='')
-
 
 def main(args):
     os.makedirs('/opt/data/tmp/', exist_ok=True)
@@ -74,11 +72,11 @@ def main(args):
                 print(f'Using cached dataset in {new_dataset_dir}')
             dataset_uri = new_dataset_dir
 
-        run_vissl(args.config, dataset_uri, output_uri, pretrained_path=pretrained_uri)
-
-        if orig_output_uri.startswith('s3://'):
-            s3_sync(output_uri, orig_output_uri)
-
+        try:
+            run_vissl(args.config, dataset_uri, output_uri, pretrained_path=pretrained_uri)
+        finally:
+            if orig_output_uri.startswith('s3://'):
+                s3_sync(output_uri, orig_output_uri)
 
 def get_arg_parser():
     parser = argparse.ArgumentParser(description='Run VISSL')
